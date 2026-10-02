@@ -321,6 +321,10 @@ textarea.inp{width:100%;min-height:90px;resize:vertical;font-size:13px;font-fami
 .hfbot.en{color:var(--ink2);font-size:19px}
 .hfphase{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3)}
 .hfphase.go{color:var(--amber)}
+.talkheard{font-size:16px;color:var(--ink2);min-height:24px;font-weight:600}
+.talkdots{display:flex;gap:6px;justify-content:center;min-height:8px}
+.talkdots i{width:8px;height:8px;border-radius:50%;background:var(--card2);box-shadow:inset 0 0 0 1px var(--line2)}
+.talkdots i.used{background:var(--amber);box-shadow:none}
 .hfrow{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 4px;border-bottom:1px solid var(--line)}
 .hfrow b{display:block;font-size:15.5px}
 .hfrow .grow>span{display:block;font-size:13px;color:var(--ink2)}
@@ -603,7 +607,7 @@ function sfx(kind) {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
     if (actx.state === 'suspended') actx.resume();
     const t = actx.currentTime;
-    const seq = kind === 'ok' ? [[660, 0], [990, .08]] : kind === 'done' ? [[523, 0], [659, .1], [784, .2], [1047, .32]] : [[247, 0], [220, .1]];
+    const seq = kind === 'cue' ? [[880, 0]] : kind === 'ok' ? [[660, 0], [990, .08]] : kind === 'done' ? [[523, 0], [659, .1], [784, .2], [1047, .32]] : [[247, 0], [220, .1]];
     seq.forEach(([f, dt]) => {
       const o = actx.createOscillator(), g = actx.createGain();
       o.type = kind === 'bad' ? 'triangle' : 'sine'; o.frequency.value = f;
@@ -2135,27 +2139,162 @@ function hfLists() {
 function hfPicker() {
   const lists = hfLists();
   if (!lists.length) { toast('Audio is still loading…'); return; }
-  let src = lists[0][0], len = 20;
+  let src = lists[0][0], len = 20, mode = micOn() ? 'talk' : 'pod';
   sheet((el, close) => {
-    const box = h('div'), seg = h('div', {class: 'seg'}), est = h('div', {class: 'muted small', style: 'margin:-4px 0 14px'});
+    const modes = h('div', {class: 'seg'}), box = h('div'), seg = h('div', {class: 'seg'}), est = h('div', {class: 'muted small', style: 'margin:-4px 0 14px'}), what = h('p', {class: 'muted', style: 'margin:10px 0 14px'});
     const paint = () => {
+      modes.innerHTML = '';
+      [['talk', 'It listens to me'], ['pod', 'Podcast']].forEach(([k, t]) => modes.append(h('button', {class: mode === k ? 'on' : '', onclick: () => { if (k === 'talk' && !micOn()) { toast(SR ? 'Turn on “Check my pronunciation” in Settings first' : 'This browser can\'t listen. Podcast mode works everywhere'); return; } mode = k; paint(); }}, t)));
+      what.textContent = mode === 'talk'
+        ? 'You hear the English and say the French. It listens: right, and it moves on; not quite, you hear the answer and try again (up to three times). Keep the screen on.'
+        : 'Plays like a podcast and keeps going with the screen locked. You hear the English, say the French in the pause, then hear it twice.';
       box.innerHTML = '';
       lists.forEach(([k, t, l]) => box.append(h('button', {class: 'listbtn' + (src === k ? ' on' : ''), onclick: () => { src = k; paint(); }},
         h('span', {class: 'ic', html: src === k ? I.check : I.play}), h('div', {class: 'grow'}, h('b', null, t), h('span', null, l.length + ' phrase' + (l.length > 1 ? 's' : ''))))));
       seg.innerHTML = '';
       [10, 20, 30].forEach(n => seg.append(h('button', {class: len === n ? 'on' : '', onclick: () => { len = n; paint(); }}, n + ' phrases')));
       const n = Math.min(len, lists.find(x => x[0] === src)[2].length);
-      est.textContent = n + ' phrases · about ' + Math.max(1, Math.round(n * 7.6 / 60)) + ' min of audio';
+      est.textContent = mode === 'talk' ? n + ' phrases · about ' + Math.max(1, Math.round(n * 12 / 60)) + ' min' : n + ' phrases · about ' + Math.max(1, Math.round(n * 7.6 / 60)) + ' min of audio';
     };
     paint();
-    el.append(h('h2', null, 'Hands-free'), h('p', {class: 'muted'}, 'Plays like a podcast and keeps going with the screen locked. You hear the English, say the French out loud in the pause, then hear it twice.'),
-      box, h('div', {style: 'margin-top:6px'}, seg), est,
+    el.append(h('h2', null, 'Hands-free'), modes, what, box, h('div', {style: 'margin-top:6px'}, seg), est,
       h('button', {class: 'btn primary', onclick: () => {
         const [, , l, ordered] = lists.find(x => x[0] === src);
-        close(); startHands((ordered ? l : shuffle(l)).slice(0, len));
-      }}, 'Get it ready'));
+        const pickd = (ordered ? l : shuffle(l));
+        close();
+        if (mode === 'talk') startTalk(pickd.filter(f => !ITEMS[f].rec).slice(0, len));
+        else startHands(pickd.slice(0, len));
+      }}, 'Start'));
   });
 }
+function startTalk(list) {
+  if (!list.length) { toast('Nothing to practise there yet'); return; }
+  session = {kind: 'hands', talk: 1, list, steps: [{t: 'talk'}], i: 0, ok: 0, bad: 0, missed: [], t0: Date.now()};
+  enterSession();
+}
+/* Hands-free, listening: English cue → it listens → right: hear it once and move on;
+   not quite: hear the answer and try again, three tries. Only a first-try success moves a
+   phrase up; the misses are offered for tomorrow's reviews at the end. Needs the screen on
+   (iOS gives a locked page no microphone), so it holds a wake lock. */
+VIEWS.talk = function (st, inner) {
+  const s = session, list = s.list, res = {};
+  let i = 0, token = 0, running = false, tapMode = false, quiet = 0, override = false, okOnce = false;
+  const cnt = h('div', {class: 'kick', style: 'text-align:center;margin:0'}), phase = h('div', {class: 'hfphase'}, 'Ready');
+  const top = h('div', {class: 'hftop'}), heard = h('div', {class: 'talkheard'}), bottom = h('div', {class: 'hfbot'}), dots = h('div', {class: 'talkdots'});
+  const card = h('div', {class: 'hfcard'}, cnt, top, phase, heard, bottom, dots);
+  const fill = h('i', {style: 'width:0'}), bar = h('div', {class: 'bar', style: 'margin:16px 0 0'}, fill);
+  const playBtn = h('button', {class: 'c main', 'aria-label': 'Start', html: I.play});
+  const skipBtn = h('button', {class: 'c', 'aria-label': 'Skip phrase', html: I.next});
+  const backBtn = h('button', {class: 'c', 'aria-label': 'Previous phrase', html: I.prev});
+  const rightBtn = h('button', {class: 'btn link', style: 'display:block;margin:4px auto 0'}, 'I said it right');
+  const tapBtn = h('button', {class: 'btn primary', style: 'display:none;margin-top:12px'}, 'Tap, then speak');
+  const note = h('div', {class: 'muted small', style: 'text-align:center;margin-top:6px'}, 'Say the French out loud after the beep. Keep the screen on.');
+  inner.append(h('div', {class: 'kick'}, 'Hands-free · it listens'), card, bar, h('div', {class: 'shctl', style: 'margin-top:18px'}, backBtn, playBtn, skipBtn), tapBtn, rightBtn, note);
+  footer(h('button', {class: 'btn ghost', onclick: () => end()}, 'Finish'));
+  rightBtn.style.visibility = 'hidden';
+  const paintBtn = () => { playBtn.innerHTML = running ? I.pause : I.play; playBtn.setAttribute('aria-label', running ? 'Pause' : 'Start'); };
+  const show = () => {
+    const it = ITEMS[list[i]]; if (!it) return;
+    cnt.textContent = (i + 1) + ' / ' + list.length; top.textContent = it.e; bottom.textContent = ''; heard.textContent = '';
+    fill.style.width = (i / list.length * 100) + '%'; dots.innerHTML = '';
+  };
+  const setPhase = (t, go) => { phase.textContent = t; phase.className = 'hfphase' + (go ? ' go' : ''); };
+  const tries = n => { dots.innerHTML = ''; for (let k = 0; k < 3; k++) dots.append(h('i', {class: k < n ? 'used' : ''})); };
+  let lock = null;
+  const wake = async () => { try { if (navigator.wakeLock && !lock) { lock = await navigator.wakeLock.request('screen'); lock.addEventListener('release', () => { lock = null; }); } } catch (e) {} };
+  const stopAll = () => { token++; running = false; if (_srStop) _srStop(); stopAudio(); paintBtn(); rightBtn.style.visibility = 'hidden'; };
+  s.cleanup = () => { stopAll(); if (lock) lock.release().catch(() => {}); };
+  rightBtn.onclick = () => { override = true; if (_srStop) _srStop(); };
+  async function listen(my) {   // → array of things heard, 'quiet', or 'stop'
+    override = false; rightBtn.style.visibility = 'visible';
+    if (tapMode) {
+      tapBtn.style.display = 'block'; setPhase('Tap, then say it in French', true);
+      await new Promise(r => { tapBtn.onclick = r; s.tapWake = r; });
+      tapBtn.style.display = 'none';
+      if (my !== token) return 'stop';
+    }
+    sfx('cue'); setPhase('Your turn: say it in French', true);
+    try {
+      const alts = await recognize(t => { heard.textContent = '“' + t + '”'; });
+      okOnce = true; return alts;
+    } catch (e) {
+      if (override) return [];
+      if (e === 'not-allowed' || e === 'service-not-allowed') {
+        if (okOnce && !tapMode) { tapMode = true; return 'retry'; }   // iOS may want a tap for each listen
+        setPhase('Can\'t use the microphone'); heard.textContent = srMessage(e); return 'stop';
+      }
+      if (e === 'network' || e === 'audio-capture') { heard.textContent = srMessage(e); return 'stop'; }
+      return 'quiet';
+    }
+  }
+  async function run() {
+    const my = ++token; running = true; paintBtn(); wake();
+    while (my === token && i < list.length && session === s) {
+      const f = list[i], it = ITEMS[f];
+      show(); setPhase('Listen');
+      await play('en|' + it.e);
+      if (my !== token) return;
+      let got = false, n = 0;
+      while (n < 3 && !got) {
+        tries(n);
+        const r = await listen(my);
+        if (my !== token) return;
+        if (r === 'stop') { stopAll(); return; }
+        if (r === 'retry') continue;
+        if (r === 'quiet') {
+          quiet++;
+          if (quiet >= 2) { stopAll(); quiet = 0; setPhase('Paused'); heard.textContent = 'Didn\'t hear anything. Tap play when you\'re ready.'; return; }
+          heard.textContent = 'Didn\'t hear you. Once more…'; await wait(700); if (my !== token) return; continue;
+        }
+        quiet = 0;
+        const best = Math.max(0, ...r.flatMap(a => variants(it.f).map(t => similarity(a, t))));
+        if (override || best >= .65) { got = true; break; }
+        n++; tries(n);
+        heard.textContent = '“' + (r[0] || '') + '”';
+        setPhase(n < 3 ? 'Not quite. Listen:' : 'Here it is:'); bottom.textContent = it.f;
+        await play(f); if (my !== token) return;
+        if (n < 3) { await wait(250); bottom.textContent = ''; }
+      }
+      rightBtn.style.visibility = 'hidden';
+      res[f] = got ? (n === 0 ? 'first' : 'later') : 'missed';
+      if (got) {
+        sfx('ok'); setPhase(n === 0 ? 'Yes!' : 'Got it'); bottom.textContent = it.f;
+        if (n === 0) grade(f, true);
+        await play(f);
+      } else { await wait(400); await play(f); }
+      if (my !== token) return;
+      await wait(800);
+      i++;
+    }
+    if (my === token && i >= list.length) end(true);
+  }
+  playBtn.onclick = () => { if (running) { stopAll(); setPhase('Paused'); } else run(); };
+  skipBtn.onclick = () => { const was = running; stopAll(); i = Math.min(list.length - 1, i + 1); show(); setPhase('Ready'); if (was) run(); };
+  backBtn.onclick = () => { const was = running; stopAll(); i = Math.max(0, i - 1); show(); setPhase('Ready'); if (was) run(); };
+  function end(finished) {
+    s.cleanup();
+    inner.innerHTML = '';
+    const done = list.filter(f => res[f]), marked = new Set(done.filter(f => res[f] === 'missed'));
+    const first = done.filter(f => res[f] === 'first').length;
+    inner.append(h('div', {class: 'kick'}, 'Hands-free'), h('div', {class: 'qtitle', style: 'margin-bottom:4px'}, finished ? 'Done!' : 'Stopped'),
+      h('div', {class: 'muted', style: 'margin-bottom:14px'}, done.length ? first + ' of ' + done.length + ' right on the first try. The ones marked come back in tomorrow\'s reviews; tap to change.' : 'Nothing practised yet.'));
+    const box = h('div', {class: 'ilist'});
+    done.forEach(f => {
+      const it = ITEMS[f];
+      const r = h('button', {class: 'hfrow' + (marked.has(f) ? ' on' : '')}, h('div', {class: 'grow'}, h('b', null, it.f), h('span', null, it.e + (res[f] === 'first' ? ' · first try' : res[f] === 'later' ? ' · got it after a retry' : ''))), h('span', {class: 'hfmark'}, marked.has(f) ? 'Missed' : 'Got it'));
+      r.onclick = () => { if (marked.has(f)) marked.delete(f); else marked.add(f); r.classList.toggle('on', marked.has(f)); r.querySelector('.hfmark').textContent = marked.has(f) ? 'Missed' : 'Got it'; };
+      box.append(r);
+    });
+    inner.append(box);
+    footer(h('button', {class: 'btn primary', onclick: () => {
+      marked.forEach(f => grade(f, false));
+      s.bad = marked.size; s.ok = done.length - marked.size; s.heard = done.length; s.missed = [...marked];
+      logActivity('review', done.length); next();
+    }}, 'Done'));
+  }
+  show(); tries(0); paintBtn();
+  setPhase(micOn() ? 'Tap play to start' : 'Turn on “Check my pronunciation” in Settings');
+};
 function startHands(list) {
   session = {kind: 'hands', list, steps: [{t: 'hands'}], i: 0, ok: 0, bad: 0, missed: [], t0: Date.now()};
   enterSession();
@@ -2252,8 +2391,8 @@ VIEWS.hands = function (st, inner) {
     const box = h('div', {class: 'ilist'});
     list.slice(0, cur < 0 ? list.length : Math.max(cur + 1, 1)).forEach(f => {
       const it = ITEMS[f];
-      const r = h('button', {class: 'hfrow'}, h('div', {class: 'grow'}, h('b', null, it.f), h('span', null, it.e)), h('span', {class: 'hfmark'}, 'Missed'));
-      r.onclick = () => { if (marked.has(f)) marked.delete(f); else marked.add(f); r.classList.toggle('on', marked.has(f)); };
+      const r = h('button', {class: 'hfrow'}, h('div', {class: 'grow'}, h('b', null, it.f), h('span', null, it.e)), h('span', {class: 'hfmark'}, marked.has(f) ? 'Missed' : 'Got it'));
+      r.onclick = () => { if (marked.has(f)) marked.delete(f); else marked.add(f); r.classList.toggle('on', marked.has(f)); r.querySelector('.hfmark').textContent = marked.has(f) ? 'Missed' : 'Got it'; };
       box.append(r);
     });
     inner.append(box);
