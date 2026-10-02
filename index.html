@@ -270,6 +270,31 @@ textarea.inp{width:100%;min-height:90px;resize:vertical;font-size:13px;font-fami
 .legend{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:12px;color:var(--ink2)}
 .legend b{display:block;font-size:17px;color:var(--ink);font-family:var(--display)}
 .legend span::before{content:'';display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;background:var(--c)}
+.plabel{font-size:12.5px;font-weight:700;color:var(--ink2);margin:0 0 10px}
+.idk{display:block;margin:10px auto 0;color:var(--ink2)}
+.card.place{position:relative;margin-bottom:12px}
+.card.place .pic{width:40px;height:40px;border-radius:12px;background:var(--card2);display:grid;place-items:center;color:var(--silver2);flex:none}
+.card.place .pic svg{width:20px;height:20px}
+.card.place b{display:block;font-size:16.5px;padding-right:22px}
+.pclose{position:absolute;top:10px;right:10px;width:30px;height:30px;display:grid;place-items:center;color:var(--ink2);border-radius:10px}
+.pclose svg{width:16px;height:16px}
+.presult{text-align:center;padding:6px 0 4px}
+.presult h2{font-size:28px;margin:0}
+.presult .tick{width:64px;height:64px;margin:0 auto 12px;border-radius:50%;background:var(--green);color:#06140d;display:grid;place-items:center}
+.presult .tick svg{width:34px;height:34px}
+.presult .dsub{color:var(--ink2);margin-top:6px;font-size:15px}
+.plist{margin:0 0 8px}
+.prow{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 2px;border-bottom:1px solid var(--line)}
+.prow:last-child{border-bottom:0}
+.prow b{display:block;font-size:15px;line-height:1.25}
+.prow .grow>span{display:block;font-size:12.5px;color:var(--ink2);margin-top:3px}
+.pst{width:12px;height:12px;border-radius:50%;flex:none;background:#5a6275}
+.pst.known{background:var(--green)}
+.pst.mostly{background:#a8e6c6}
+.pst.some{background:var(--silver)}
+.pst.unchecked{background:transparent;box-shadow:inset 0 0 0 1.5px var(--line2)}
+.pskip{display:flex;flex-direction:column;align-items:center;gap:4px;flex:none}
+.pskip small{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2)}
 .listbtn{display:flex;align-items:center;gap:14px;width:100%;text-align:left;padding:15px 16px;background:var(--card);border:1px solid var(--line);border-radius:var(--r2);margin-bottom:10px}
 .listbtn .ic{width:40px;height:40px;border-radius:12px;background:var(--card2);display:grid;place-items:center;color:var(--silver2);flex:none}
 .listbtn .ic svg{width:20px;height:20px}
@@ -428,7 +453,7 @@ const icon = (n, cls) => h('span', {class: cls || '', html: I[n], style: 'displa
 
 /* ---------------- storage ---------------- */
 const KEY = 'ff2';
-const DEFAULTS = {v: 1, srs: {}, done: {}, stars: [], days: {}, set: {trip: '2027-05-28', phon: true, auto: true, sfx: true, size: 15, remind: 19, badge: false}, onboard: false, resume: null, tests: {}, mine: []};
+const DEFAULTS = {v: 1, srs: {}, done: {}, stars: [], days: {}, set: {trip: '2027-05-28', phon: true, auto: true, sfx: true, size: 15, remind: 19, badge: false}, onboard: false, resume: null, tests: {}, mine: [], placed: {}, placeResume: null, placeHide: false};
 let S = load();
 function load() {
   let s = null;
@@ -740,12 +765,151 @@ function startVerbDrill(vi) {
   session = {kind: 'verb', id: vi, steps, i: 0, ok: 0, bad: 0, missed: [], t0: Date.now()};
   enterSession();
 }
+/* ---------------- placement check ----------------
+   Adaptive, unit by unit from the start of a course. Each unit gets two questions
+   (hear it → meaning, then produce it); a split gets a third. After three clean units
+   in a row, one typed answer is enough. "I don't know" is always offered, because a
+   lucky guess skips lessons he'd want. Nothing changes until the results screen,
+   where every unit can be flipped before it's applied. */
+function placeBlocks(cid) {
+  const out = [];
+  COURSES[cid].units.forEach(u => {
+    const ids = u.lessons.map(l => l.id);
+    if (ids.length < 6) { out.push({u: u.id, ls: ids}); return; }
+    const k = Math.ceil(ids.length / 3);   // big units (the Tour de France) are checked in parts
+    for (let j = 0; j < k; j++) out.push({u: u.id, ls: ids.slice(Math.round(j * ids.length / k), Math.round((j + 1) * ids.length / k)), part: 1});
+  });
+  return out.filter(b => !b.ls.every(lessonDone));
+}
+function blockLabel(b) {
+  const u = UNITS[b.u];
+  return {n: 'Unit ' + u.n, t: u.t + (b.part ? ' · ' + b.ls.map(id => LESSONS[id].t).join(', ') : '')};
+}
+const blockItems = b => b.ls.flatMap(id => LESSONS[id].items).filter(f => ITEMS[f]);
+function placeMinutes(n) { return Math.max(3, Math.round(n * 1.7 * 9 / 60)); }
+function placeQ(s) {
+  const b = s.blocks[s.bi], r = s.res[s.bi], asked = r.asked.length;
+  const usedL = r.asked.map(f => ITEM_LESSON[f]);
+  const pool = shuffle(blockItems(b).filter(f => !r.asked.includes(f)))
+    .sort((x, y) => usedL.filter(l => l === ITEM_LESSON[x]).length - usedL.filter(l => l === ITEM_LESSON[y]).length);   // spread over the unit's lessons
+  const fast = asked === 0 && s.clean >= 3;
+  const want = fast ? ['type', 'en2fr'] : asked === 0 ? ['listen'] : asked === 1 ? ['type', 'en2fr'] : [r.kinds.includes('type') ? 'en2fr' : 'build', 'en2fr'];
+  const fits = (k, it) => k === 'listen' || k === 'fr2en' || (!it.rec && (k === 'type' ? canType(it) : k === 'build' ? canBuild(it.f, it) : true));
+  const mk = (k, f) => { r.asked.push(f); r.kinds.push(k); return Object.assign(mkStep(k, f), {pl: 1, bi: s.bi, fast}); };
+  for (const k of want) { const f = pool.find(g => fits(k, ITEMS[g])); if (f) return mk(k, f); }
+  return mk('fr2en', pool[0]);
+}
+function placeAfter(s, st, ok) {
+  const r = s.res[st.bi];
+  (ok ? r.right : r.wrong).push(st.f);
+  const n = r.right.length, x = r.wrong.length;
+  let status = null;
+  if (st.fast && ok) status = 'known';
+  else if (n >= 2) status = x ? 'mostly' : 'known';
+  else if (x >= 2) status = n ? 'some' : 'new';
+  if (!status) { s.steps.push(placeQ(s)); return; }
+  r.status = status;
+  s.clean = status === 'known' ? s.clean + 1 : 0;
+  s.newRun = status === 'new' || status === 'some' ? s.newRun + 1 : 0;
+  s.bi++;
+  if (s.bi >= s.blocks.length) return;
+  if (s.newRun >= 3) { s.newRun = 0; s.steps.push({t: 'placegate'}); return; }
+  s.steps.push(placeQ(s));
+}
+function startPlacement(cid) {
+  const blocks = placeBlocks(cid);
+  session = {kind: 'place', cid, blocks, bi: 0, res: blocks.map(() => ({asked: [], kinds: [], right: [], wrong: [], status: null})), clean: 0, newRun: 0, steps: [], i: 0, ok: 0, bad: 0, missed: [], graded: {}, t0: Date.now()};
+  session.steps.push(placeQ(session));
+  S.placeResume = null; save();
+  enterSession();
+}
+function resumePlacement() { session = JSON.parse(JSON.stringify(S.placeResume)); session.finished = false; session.t0 = Date.now(); enterSession(); }
+function placeSheet(cid = 'voyage') {
+  const blocks = placeBlocks(cid);
+  if (!blocks.length) { toast('You\'ve done every lesson here already'); return; }
+  const pr = S.placeResume && S.placeResume.cid === cid ? S.placeResume : null;
+  const skipped = COURSES[cid].units.length - new Set(blocks.map(b => b.u)).size;
+  sheet((el, close) => {
+    el.append(h('h2', null, 'Find your level'),
+      h('p', {class: 'muted'}, SHORT[cid] + ' · about ' + placeMinutes(blocks.length) + ' minutes' + (skipped ? ' · leaves out the ' + skipped + ' unit' + (skipped > 1 ? 's' : '') + ' you\'ve finished' : '')),
+      h('div', {class: 'cando', style: 'margin:6px 0'}, h('b', null, 'How it works. '), 'We go through the course from the start. Each unit gets two or three quick questions: hear a phrase and pick its meaning, then write or pick the French for one.'),
+      h('div', {class: 'cando', style: 'margin:6px 0'}, h('b', null, 'Don\'t guess. '), 'Tap “I don\'t know” instead. A lucky guess skips lessons you\'d want.'),
+      h('div', {class: 'cando', style: 'margin:6px 0 14px'}, h('b', null, 'Nothing changes yet. '), 'At the end you see every unit and choose what to skip. Stop whenever you like; your answers are kept.'),
+      h('div', {style: 'display:grid;gap:10px'},
+        pr ? h('button', {class: 'btn primary', onclick: () => { close(); resumePlacement(); }}, pr.i >= pr.steps.length ? 'See my results' : 'Continue where I stopped') : null,
+        h('button', {class: 'btn ' + (pr ? 'ghost' : 'primary'), onclick: () => { close(); startPlacement(cid); }}, pr ? 'Start over' : 'Start'),
+        h('button', {class: 'btn link', onclick: close}, 'Not now')));
+  });
+}
+const PSTATUS = {known: 'You know this', mostly: 'Mostly known', some: 'Some of it', new: 'New to you', unchecked: 'Not checked'};
+function placeResults(s, inner) {
+  const rows = s.blocks.map((b, i) => ({b, r: s.res[i], skip: s.res[i].status === 'known' || s.res[i].status === 'mostly'}));
+  const head = h('div', {class: 'presult'}), foot = h('div', {style: 'display:grid;gap:10px'});
+  const paint = () => {
+    const n = rows.filter(x => x.skip).length, fo = rows.find(x => !x.skip), checked = rows.filter(x => x.r.status).length;
+    head.innerHTML = '';
+    if (!checked) head.append(h('h2', null, 'Nothing checked yet'), h('div', {class: 'dsub'}, 'Answer a few questions first, or start from Unit 1.'));
+    else if (!fo) head.append(h('div', {class: 'tick', html: I.check}), h('h2', null, 'You know all of it'), h('div', {class: 'dsub'}, 'Every unit checked out. Your reviews will keep it fresh.'));
+    else head.append(h('div', {class: 'kick', style: 'margin:0 0 6px'}, n ? 'You already know ' + n + ' of ' + rows.length : 'Your level'),
+      h('h2', null, 'Start at ' + blockLabel(fo.b).n), h('div', {class: 'dsub'}, UNITS[fo.b.u].t + (n ? '' : '. You\'ll move quickly through anything familiar.')));
+    if (n) head.append(h('p', {class: 'muted small', style: 'margin:12px 0 0'}, 'Skipped phrases still come back in your reviews over the next two weeks, so anything shaky gets caught.'));
+    foot.innerHTML = '';
+    foot.append(h('button', {class: 'btn primary', onclick: () => applyPlacement(s, rows, true)}, n ? 'Skip ' + n + ' unit' + (n > 1 ? 's' : '') + (fo ? ' · start ' + blockLabel(fo.b).n : '') : 'Start from the beginning'),
+      h('button', {class: 'btn ghost', onclick: () => { S.placeResume = null; S.placed[s.cid] = {t: Date.now(), units: 0}; save(); exitSession(true); }}, n ? 'Don\'t skip anything' : 'Close'));
+  };
+  const list = h('div', {class: 'plist'});
+  rows.forEach(x => {
+    const lab = blockLabel(x.b), st = x.r.status || 'unchecked', tried = x.r.right.length + x.r.wrong.length;
+    const sw = h('span', {class: 'switch' + (x.skip ? ' on' : '')});
+    const btn = h('button', {class: 'prow', role: 'switch', 'aria-checked': String(x.skip)},
+      h('span', {class: 'pst ' + st}), h('div', {class: 'grow'}, h('b', null, lab.t), h('span', null, lab.n + ' · ' + PSTATUS[st] + (x.r.status ? ' · ' + x.r.right.length + '/' + tried : ''))),
+      h('div', {class: 'pskip'}, h('small', null, 'Skip'), sw));
+    btn.onclick = () => { x.skip = !x.skip; sw.classList.toggle('on', x.skip); btn.setAttribute('aria-checked', String(x.skip)); paint(); };
+    list.append(btn);
+  });
+  paint();
+  inner.append(head, h('div', {class: 'sect', style: 'margin-top:18px'}, 'Each unit · tap to change'), list);
+  footer(foot);
+  sfx('done');
+}
+function applyPlacement(s, rows, go) {
+  const fresh = [], wrong = new Set(); let units = 0;
+  rows.forEach(x => {
+    if (!x.skip) return; units++;
+    x.r.wrong.forEach(f => wrong.add(f));
+    x.b.ls.forEach(id => { if (!S.done[id]) S.done[id] = {t: Date.now(), s: 100, place: 1}; LESSONS[id].items.forEach(f => { if (ITEMS[f] && !S.srs[f] && !fresh.includes(f)) fresh.push(f); }); });
+  });
+  // what he missed comes back tomorrow; everything else is spread over two weeks so no day's reviews explode
+  const spread = shuffle(fresh.filter(f => !wrong.has(f))), per = Math.max(12, Math.ceil(spread.length / 14));
+  spread.forEach((f, i) => { S.srs[f] = {b: 2, d: dayAt(1 + Math.floor(i / per)), n: 0, x: 0, t: Date.now()}; });
+  wrong.forEach(f => { if (!S.srs[f]) S.srs[f] = {b: 1, d: dayAt(1), n: 0, x: 0, t: Date.now()}; });
+  S.placed[s.cid] = {t: Date.now(), units};
+  S.placeResume = null; save();
+  session = null; stopAudio();
+  if (units) setTimeout(() => toast('Skipped ' + units + ' unit' + (units > 1 ? 's' : '') + '. ' + fresh.length + ' phrases will come back in reviews, about ' + Math.min(per, fresh.length) + ' a day.', 4200), 300);
+  const nl = nextLesson(s.cid);
+  if (go && nl) startLesson(nl.id);
+  else { tab = 'course'; curCourse = s.cid; scrollPos.course = 0; render(); }
+}
+
 function resumeSession() { if (!S.resume) return; session = S.resume; session.t0 = Date.now(); enterSession(); }
 function enterSession() { stopAudio(); render(); }
 function persistResume() {
   if (session && session.kind === 'lesson' && !session.finished) { S.resume = {kind: 'lesson', id: session.id, steps: session.steps, i: session.i, ok: session.ok, bad: session.bad, missed: session.missed}; save(); }
+  if (session && session.kind === 'place') { S.placeResume = JSON.parse(JSON.stringify(session)); save(); }
 }
 function exitSession(force) {
+  if (!force && session && session.kind === 'place' && !session.finished && session.i > 0) {
+    const s = session;
+    sheet((el, close) => {
+      el.append(h('h2', null, 'Stop the placement check?'), h('p', {class: 'muted'}, 'Your answers are saved. See what you know so far, or come back later and carry on.'),
+        h('div', {style: 'display:grid;gap:10px;margin-top:18px'},
+          h('button', {class: 'btn primary', onclick: () => { close(); s.steps.length = Math.min(s.steps.length, s.steps[s.i] && s.steps[s.i].answered ? s.i + 1 : s.i); s.i = s.steps.length; persistResume(); showStep(); }}, 'See my results so far'),
+          h('button', {class: 'btn ghost', onclick: () => { close(); persistResume(); session = null; stopAudio(); render(); }}, 'Save and leave'),
+          h('button', {class: 'btn link', onclick: close}, 'Keep going')));
+    });
+    return;
+  }
   if (!force && session && !session.finished && session.i > 0) {
     confirmSheet('Leave this ' + (session.kind === 'lesson' ? 'lesson' : 'session') + '?', session.kind === 'lesson' ? 'Your place is saved; you can pick up where you left off.' : 'Your answers so far are saved.', 'Leave', () => { persistResume(); session = null; stopAudio(); render(); });
     return;
@@ -843,6 +1007,20 @@ function homePage(p) {
     days > 0 ? h('div', {class: 'jn'}, days, h('small', null, days === 1 ? 'day to go' : 'days to go')) : h('div', {class: 'jn'}, 'Bon voyage'),
     plan));
 
+  // placement check: offered until he's taken it or waved it away, and resumable
+  const pr = S.placeResume && S.placeResume.cid === 'voyage' ? S.placeResume : null;
+  if (pr) {
+    const ready = pr.i >= pr.steps.length, at = pr.blocks[Math.min(pr.bi, pr.blocks.length - 1)];
+    p.append(h('div', {class: 'card place'}, h('div', {class: 'row'}, h('span', {class: 'pic', html: I.bolt}),
+      h('div', {class: 'grow'}, h('b', null, ready ? 'Your placement results are ready' : 'Finish your placement check'), h('div', {class: 'muted small'}, ready ? 'Choose which units to skip.' : 'You stopped at ' + blockLabel(at).n + '. Your answers are saved.'))),
+      h('button', {class: 'btn primary', style: 'margin-top:14px', onclick: resumePlacement}, ready ? 'See my results' : 'Continue')));
+  } else if (!S.placed.voyage && !S.placeHide && cp.d < cp.n * .3 && placeBlocks('voyage').length > 2) {
+    p.append(h('div', {class: 'card place'},
+      h('button', {class: 'pclose', 'aria-label': 'Hide', html: I.x, onclick: () => { S.placeHide = true; save(); render(); toast('It\'s still in the Course tab'); }}),
+      h('div', {class: 'row'}, h('span', {class: 'pic', html: I.bolt}), h('div', {class: 'grow'}, h('b', null, 'Already know some French?'), h('div', {class: 'muted small'}, 'A quick check finds what you know, so you start at the right lesson. About ' + placeMinutes(placeBlocks('voyage').length) + ' minutes.'))),
+      h('button', {class: 'btn primary', style: 'margin-top:14px', onclick: () => placeSheet('voyage')}, 'Find my level')));
+  }
+
   // continue
   const res = S.resume && LESSONS[S.resume.id] ? LESSONS[S.resume.id] : null;
   const nl = res || nextLesson('voyage');
@@ -895,6 +1073,13 @@ function coursePage(p) {
   p.append(h('div', {class: 'card', style: 'margin-bottom:16px'},
     h('div', {class: 'row'}, h('div', {class: 'grow'}, h('h2', {style: 'font-size:20px'}, c.t), h('div', {class: 'muted small'}, c.sub), c.fast ? h('span', {class: 'pill green', style: 'margin-top:8px'}, 'Native speed audio') : null), h('b', {style: 'font-family:var(--display);font-size:20px'}, Math.round(cp.d / cp.n * 100) + '%')),
     h('div', {class: 'bar', style: 'margin-top:12px'}, h('i', {style: 'width:' + (cp.d / cp.n * 100) + '%'}))));
+  const pb = curCourse === 'mine' ? [] : placeBlocks(curCourse);
+  if (pb.length >= 2) {
+    const pr = S.placeResume && S.placeResume.cid === curCourse;
+    p.append(h('button', {class: 'listbtn', style: 'margin:-4px 0 16px', onclick: () => placeSheet(curCourse)}, h('span', {class: 'ic', html: I.bolt}),
+      h('div', {class: 'grow'}, h('b', null, pr ? 'Finish your placement check' : S.placed[curCourse] ? 'Check your level again' : 'Find my level'), h('span', null, 'Skip the units you already know · about ' + placeMinutes(pb.length) + ' min')),
+      h('span', {class: 'faint', html: I.chev, style: 'width:18px;height:18px;transform:rotate(-90deg)'})));
+  }
   const nl = nextLesson(curCourse);
   let curEl = null;
   c.units.forEach(u => {
@@ -1231,9 +1416,11 @@ function onboarding() {
       h('p', {class: 'muted'}, 'A course built around your trip, start to finish. Here\'s the routine:'),
       h('div', {class: 'cando', style: 'margin:6px 0'}, h('b', null, '1 · Do the next lesson. '), 'About 7 minutes: new phrases, practice, a real conversation.'),
       h('div', {class: 'cando', style: 'margin:6px 0'}, h('b', null, '2 · Clear your reviews. '), 'Phrases come back just before you\'d forget them.'),
-      h('div', {class: 'cando', style: 'margin:6px 0 14px'}, h('b', null, '3 · Skip what you know. '), 'Every unit has a quick test-out, and nothing is locked.'),
+      h('div', {class: 'cando', style: 'margin:6px 0 14px'}, h('b', null, '3 · Skip what you know. '), 'A placement check finds your level, and nothing is locked.'),
       h('div', {class: 'field', style: 'border:0'}, h('div', null, h('label', null, 'When do you leave?'), h('div', {class: 'd'}, 'You can change this in settings')), date),
-      h('button', {class: 'btn primary', style: 'margin-top:8px', onclick: () => { close(); }}, 'Let\'s go'));
+      h('div', {style: 'display:grid;gap:10px;margin-top:8px'},
+        h('button', {class: 'btn primary', onclick: () => { close(); setTimeout(() => placeSheet('voyage'), 320); }}, 'Find my level first'),
+        h('button', {class: 'btn ghost', onclick: () => { close(); }}, 'Start from Unit 1')));
   }, {onClose: () => { S.onboard = true; save(); render(); }});
 }
 
@@ -1256,6 +1443,7 @@ function sessionView() {
 }
 function progress() {
   const s = session;
+  if (s.kind === 'place') { const n = s.blocks.length; SV.bar.style.width = (s.finished || s.i >= s.steps.length ? 100 : s.bi / n * 100) + '%'; SV.cnt.textContent = s.finished || s.i >= s.steps.length ? '' : Math.min(s.bi + 1, n) + '/' + n; return; }
   SV.bar.style.width = Math.min(100, s.i / s.steps.length * 100) + '%';
   SV.cnt.textContent = s.finished || s.kind === 'shadow' ? '' : (s.i + 1) + '/' + s.steps.length;
 }
@@ -1269,6 +1457,7 @@ function showStep() {
   const st = s.steps[s.i];
   const inner = h('div', {class: 'in'});
   SV.body.innerHTML = ''; SV.body.append(inner);
+  if (st.pl) { const lab = blockLabel(s.blocks[st.bi]); inner.append(h('div', {class: 'plabel'}, lab.n + ' · ' + UNITS[s.blocks[st.bi].u].t)); }
   (VIEWS[st.t] || VIEWS.fr2en)(st, inner);
 }
 function continueBtn(label = 'Continue', cls = 'primary') { return h('button', {class: 'btn ' + cls, onclick: next}, label); }
@@ -1283,6 +1472,7 @@ function answer(st, ok, info = {}) {
     if (ok) s.ok++; else s.bad++;
     if (st.f && (s.kind === 'review' || s.kind === 'practice') && !s.graded[st.f]) { s.graded[st.f] = 1; grade(st.f, ok); }
     if (!ok && st.f && ['lesson', 'review', 'practice'].includes(s.kind) && !s.missed.includes(st.f)) { s.missed.push(st.f); s.steps.push(retryStep(st)); }
+    if (s.kind === 'place') { placeAfter(s, st, ok); persistResume(); }
   }
   logActivity(s.kind === 'review' || s.kind === 'practice' ? 'review' : 'answer');
   sfx(ok ? 'ok' : 'bad'); vib(ok ? 10 : [20, 40, 20]);
@@ -1294,6 +1484,10 @@ function answer(st, ok, info = {}) {
       !ok || info.show ? h('div', null, h('div', {class: 'ans'}, ansFr), ansEn ? h('div', {class: 'ansen'}, ansEn) : null) : null,
       info.note ? h('div', {class: 'note'}, info.note) : null),
     ansFr && self.AUDIO[info.audio || ansFr] ? spk(info.audio || ansFr) : null);
+  if (s.kind === 'place' && ok && !info.note) {   // placement keeps moving: a right answer doesn't need a tap
+    footer(h('div', {class: 'fbwrap'}, fb)); const at = s.i;
+    setTimeout(() => { if (session === s && s.i === at) next(); }, 800); return;
+  }
   footer(h('div', {class: 'fbwrap'}, fb, continueBtn('Continue', ok ? 'green' : 'amber')));
   if (S.set.auto && (info.audio || ansFr) && info.play !== false) play(info.audio || ansFr);
 }
@@ -1313,6 +1507,11 @@ function optionButtons(st, inner, labelOf, isRight, onPick) {
     box.append(b);
   });
   inner.append(box);
+  if (session && session.kind === 'place') {
+    const dk = h('button', {class: 'btn link idk'}, 'I don\'t know');
+    dk.onclick = () => { if (box.dataset.done) return; box.dataset.done = 1; [...box.children].forEach((c, j) => c.classList.add(isRight(st.opts[j]) ? 'ok' : 'dim')); dk.remove(); onPick(false, null); };
+    inner.append(dk);
+  }
 }
 
 const VIEWS = {
@@ -1390,6 +1589,7 @@ const VIEWS = {
       pool.append(t);
     });
     inner.append(line, pool);
+    if (session.kind === 'place') inner.append(h('button', {class: 'btn link idk', onclick: e => { if (check.dataset.done) return; check.dataset.done = 1; e.currentTarget.remove(); answer(st, false, {fr: target, en: prompt, show: true}); }}, 'I don\'t know'));
     check.onclick = () => {
       check.dataset.done = 1;
       const got = chosen.map(c => c.dataset.w).join(' ');
@@ -1470,6 +1670,15 @@ const VIEWS = {
     } else optionButtons(st, inner, o => o, o => o === st.ans, ok => answer(st, ok, {fr: st.ans, en: '', show: true}));
   },
 };
+VIEWS.placegate = function (st, inner) {
+  const s = session, left = s.blocks.length - s.bi;
+  inner.append(h('div', {class: 'tipcard'},
+    h('div', {class: 'lab'}, h('span', {html: I.bolt, style: 'width:16px;height:16px;display:block'}), 'Placement check'),
+    h('h3', null, 'This is about where new stuff starts'),
+    h('p', null, 'The last three units were mostly new to you, so your lessons should probably start around here. You can stop now, or keep checking the ' + left + ' unit' + (left > 1 ? 's' : '') + ' after them in case you already know some later topics.')));
+  footer(h('div', {style: 'display:grid;gap:10px'}, h('button', {class: 'btn primary', onclick: next}, 'See my results'),
+    h('button', {class: 'btn ghost', onclick: () => { if (st.done) return; st.done = 1; s.steps.push(placeQ(s)); next(); }}, 'Keep checking')));
+};
 function accentBar(inp) {
   const bar = h('div', {class: 'accents'});
   ['é', 'è', 'ê', 'à', 'â', 'ç', 'ù', 'û', 'ô', 'î', 'ï', 'ë', 'œ', "'"].forEach(c => bar.append(h('button', {type: 'button', onpointerdown: e => e.preventDefault(), onclick: () => {
@@ -1484,7 +1693,7 @@ function typeView(st, inner, dictation) {
   else inner.append(h('div', {class: 'kick'}, 'Write it in French'), h('div', {class: 'prompt', style: 'margin-bottom:20px'}, it.e));
   const inp = h('input', {class: 'typein', placeholder: dictation ? 'What did you hear?' : 'Type in French', autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'done'});
   const check = h('button', {class: 'btn primary', disabled: true}, 'Check');
-  const dk = h('button', {class: 'btn link', style: 'margin-top:4px'}, 'I don\'t know');
+  const dk = h('button', {class: 'btn link idk', style: 'margin-top:4px'}, 'I don\'t know');
   inner.append(inp, accentBar(inp), dk);
   inp.addEventListener('input', () => { check.disabled = !inp.value.trim(); });
   const go = (giveUp) => {
@@ -1664,6 +1873,7 @@ function finish() {
   const mins = Math.max(1, Math.round((Date.now() - s.t0) / 60000));
   const inner = h('div', {class: 'in'});
   SV.body.innerHTML = ''; SV.body.append(inner);
+  if (s.kind === 'place') return placeResults(s, inner);
   let title = 'Session complete', sub = '', cando = null, primary = null;
   if (s.kind === 'lesson') {
     const l = LESSONS[s.id];
