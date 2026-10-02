@@ -484,7 +484,7 @@ const icon = (n, cls) => h('span', {class: cls || '', html: I[n], style: 'displa
 
 /* ---------------- storage ---------------- */
 const KEY = 'ff2';
-const DEFAULTS = {v: 1, srs: {}, done: {}, stars: [], days: {}, set: {trip: '2027-05-28', phon: true, auto: true, sfx: true, size: 15, remind: 21, badge: false}, onboard: false, resume: null, tests: {}, mine: [], placed: {}, placeResume: null, placeHide: false, roles: {}, ear: {}};
+const DEFAULTS = {v: 1, srs: {}, done: {}, stars: [], days: {}, set: {trip: '2027-05-28', phon: true, auto: true, sfx: true, size: 15, remind: 21, badge: false, mic: true}, onboard: false, resume: null, tests: {}, mine: [], placed: {}, placeResume: null, placeHide: false, roles: {}, ear: {}};
 let S = load();
 function load() {
   let s = null;
@@ -616,17 +616,45 @@ function sfx(kind) {
 
 /* ---------------- speech recognition (if the phone offers it) ---------------- */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-function recognize() {
-  return new Promise((res, rej) => {
-    let r; try { r = new SR(); } catch (e) { rej('unsupported'); return; }
-    r.lang = 'fr-FR'; r.interimResults = false; r.maxAlternatives = 5;
-    let got = false;
-    r.onresult = e => { got = true; res(Array.from(e.results[0]).map(a => a.transcript)); };
-    r.onerror = e => { if (!got) rej(e.error || 'error'); };
-    r.onend = () => { if (!got) rej('no-speech'); };
-    try { r.start(); } catch (e) { rej('error'); }
-    setTimeout(() => { try { r.stop(); } catch (e) {} }, 7000);
+let _srBusy = false, _srStop = null;
+const micOn = () => !!SR && S.set.mic !== false;
+function recognize(onHeard) {
+  return new Promise(async (res, rej) => {
+    if (_srBusy) { if (_srStop) _srStop(); rej('busy'); return; }
+    _srBusy = true;
+    // iOS records silence while the phrase audio still holds the speaker: let go of it first
+    stopAudio(); try { player.removeAttribute('src'); player.load(); } catch (e) {}
+    await new Promise(r => setTimeout(r, 250));
+    let r; try { r = new SR(); } catch (e) { _srBusy = false; rej('unsupported'); return; }
+    r.lang = 'fr-FR'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 5;
+    let heard = [], lastErr = null, settled = false, stopT, hardT;
+    const finish = () => {
+      if (settled) return; settled = true; _srBusy = false; _srStop = null; clearTimeout(stopT); clearTimeout(hardT);
+      try { localStorage.removeItem('ff_sr'); } catch (e) {}
+      if (heard.length) res(heard); else rej(lastErr || 'no-speech');
+    };
+    r.onresult = e => {
+      // iOS often sends only interim results before it ends: keep the latest text, final or not
+      const rs = Array.from(e.results), last = rs[rs.length - 1];
+      const before = rs.slice(0, -1).map(x => x[0] ? x[0].transcript : '').join(' ');
+      heard = Array.from(last || []).map(a => (before + ' ' + a.transcript).trim()).filter(Boolean);
+      if (heard.length && onHeard) onHeard(heard[0]);
+      if (last && last.isFinal) { try { r.stop(); } catch (err) {} }
+    };
+    r.onerror = e => { lastErr = e.error || 'error'; };
+    r.onend = finish;
+    _srStop = () => { try { r.stop(); } catch (e) {} };
+    stopT = setTimeout(() => { try { r.stop(); } catch (e) {} }, 7000);
+    hardT = setTimeout(() => { try { r.abort(); } catch (e) {} finish(); }, 9500);
+    try { localStorage.setItem('ff_sr', String(Date.now())); r.start(); } catch (e) { lastErr = 'error'; finish(); }
   });
+}
+function srMessage(e) {
+  if (e === 'not-allowed' || e === 'service-not-allowed') return 'The microphone or speech recognition isn\'t allowed. On iPhone: Settings → Safari → Microphone, and turn on Siri or Dictation. Or just say it out loud.';
+  if (e === 'network') return 'The speech check needs internet. Say it out loud for now.';
+  if (e === 'audio-capture') return 'Couldn\'t use the microphone. Say it out loud for now.';
+  if (e === 'busy') return '';
+  return 'Didn\'t catch that. Tap the mic, speak, then tap it again when you\'re done.' + (e && e !== 'no-speech' && e !== 'aborted' ? ' (' + e + ')' : '');
 }
 function similarity(a, b) { a = base(a); b = base(b); const m = Math.max(a.length, b.length) || 1; return 1 - lev(a, b) / m; }
 
@@ -1384,6 +1412,7 @@ function settingsSheet() {
       sw('phon', 'Pronunciation hints', 'Show “bon-zhoor” spellings under phrases'),
       sw('auto', 'Play audio automatically', 'Hear each phrase as it appears'),
       sw('sfx', 'Sound effects', 'Chimes for right and wrong answers'),
+      SR ? sw('mic', 'Check my pronunciation', 'Uses the phone\'s speech recognition (needs internet). Off: you just say it out loud.') : null,
       h('div', {class: 'field'}, h('div', null, h('label', null, 'Review session size'), h('div', {class: 'd'}, 'Phrases per review')), size),
       h('div', {class: 'sect'}, 'Daily reminder'),
       reminderBlock(),
@@ -1770,20 +1799,20 @@ function speakView(st, inner, recall) {
     h('div', {class: 'card', style: 'text-align:center;padding:24px 18px'}, h('div', {class: 'prompt fr'}, it.f), S.set.phon && it.p ? h('div', {class: 'faint'}, it.p) : null, h('div', {class: 'muted', style: 'margin-top:4px'}, it.e),
       h('div', {class: 'listenbox', style: 'margin:16px 0 0'}, spk(it.f, true), slowBtn(it.f))));
   const heard = h('div', {class: 'heard'});
-  if (SR) {
+  if (micOn()) {
     const mic = h('button', {class: 'mic', 'aria-label': 'Speak', html: I.mic});
     mic.onclick = async () => {
-      if (mic.classList.contains('on')) return;
-      stopAudio(); mic.classList.add('on'); heard.textContent = 'Listening…';
+      if (mic.classList.contains('on')) { if (_srStop) _srStop(); return; }
+      mic.classList.add('on'); heard.textContent = 'Listening… tap the mic again when you\'re done';
       try {
-        const alts = await recognize();
+        const alts = await recognize(t => { heard.textContent = '“' + t + '”'; });
         const best = alts.map(a => ({a, s: similarity(a, it.f)})).sort((x, y) => y.s - x.s)[0];
         heard.innerHTML = '';
         heard.append(h('div', {class: 'small faint'}, 'We heard'), h('div', {style: 'font-weight:700;color:var(--ink)'}, '“' + best.a + '”'),
           h('div', {style: 'margin-top:4px;font-weight:700;color:' + (best.s >= .7 ? 'var(--green)' : 'var(--amber)')}, best.s >= .85 ? 'Excellent pronunciation!' : best.s >= .7 ? 'Good, that was clear.' : best.s >= .45 ? 'Close. Listen again and retry.' : 'Not quite. Listen and try again.'));
         if (best.s >= .7) { sfx('ok'); footer(continueBtn('Continue', 'green')); }
       } catch (e) {
-        heard.textContent = e === 'not-allowed' || e === 'service-not-allowed' ? 'Microphone not available. Just say it aloud.' : 'Didn\'t catch that. Tap the mic and try again, or just continue.';
+        heard.textContent = srMessage(e);
       }
       mic.classList.remove('on');
     };
@@ -1976,18 +2005,18 @@ VIEWS.role = function (st, inner) {
     chat.append(card);
     const heard = h('div', {class: 'heard'});
     let mic = null, hinted = false;
-    if (SR) {
+    if (micOn()) {
       mic = h('button', {class: 'mic sm', 'aria-label': 'Speak', html: I.mic});
       mic.onclick = async () => {
-        if (mic.classList.contains('on')) return;
-        stopAudio(); mic.classList.add('on'); heard.textContent = 'Listening…';
+        if (mic.classList.contains('on')) { if (_srStop) _srStop(); return; }
+        mic.classList.add('on'); heard.textContent = 'Listening… tap again when you\'re done';
         try {
-          const alts = await recognize();
+          const alts = await recognize(t => { heard.textContent = '“' + t + '”'; });
           const best = alts.flatMap(a => [ln.fr, ...ln.alts].map(t => ({a, s: similarity(a, t)}))).sort((x, y) => y.s - x.s)[0];
           heard.innerHTML = '';
           heard.append(h('div', {class: 'small faint'}, 'We heard'), h('div', {style: 'font-weight:700;color:var(--ink)'}, '“' + best.a + '”'));
           reveal(best.s);
-        } catch (e) { heard.textContent = e === 'not-allowed' || e === 'service-not-allowed' ? 'Microphone not available. Say it out loud, then show the answer.' : 'Didn\'t catch that. Try again, or show the answer.'; }
+        } catch (e) { heard.textContent = srMessage(e); }
         mic.classList.remove('on');
       };
       chat.append(h('div', {class: 'rolemic'}, mic, heard));
@@ -2347,6 +2376,10 @@ document.addEventListener('keydown', e => {
 });
 render();
 updateBadge();
+try {   // the speech check never finished last time: the page froze or died, so switch it off
+  const t = +localStorage.getItem('ff_sr');
+  if (t) { localStorage.removeItem('ff_sr'); if (Date.now() - t > 15000 && S.set.mic !== false) { S.set.mic = false; save(); setTimeout(() => toast('The pronunciation check froze last time, so it\'s off. You can turn it back on in Settings.', 5000), 800); } }
+} catch (e) {}
 if (!S.onboard) setTimeout(onboarding, 300);
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   // A new version installs in the background; swap to it as soon as it's safe (never mid-lesson).
