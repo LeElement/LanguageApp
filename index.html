@@ -503,7 +503,7 @@ function load() {
 }
 let _saveT;
 function save() { clearTimeout(_saveT); _saveT = setTimeout(saveNow, 120); }
-function saveNow() { clearTimeout(_saveT); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+function saveNow() { clearTimeout(_saveT); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} if (typeof syncSoon === 'function') syncSoon(); }
 addEventListener('pagehide', saveNow);
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
 if (!S.split1) {   // lessons were split into shorter parts: a finished lesson counts all its parts as finished
@@ -1420,6 +1420,8 @@ function settingsSheet() {
       h('div', {class: 'field'}, h('div', null, h('label', null, 'Review session size'), h('div', {class: 'd'}, 'Phrases per review')), size),
       h('div', {class: 'sect'}, 'Daily reminder'),
       reminderBlock(),
+      h('div', {class: 'sect'}, 'Sync across devices'),
+      syncBlock(close),
       h('div', {class: 'sect'}, 'Backup'),
       h('p', {class: 'muted small', style: 'margin:0 0 10px'}, 'Progress lives on this phone only. Copy a backup code now and then (e.g. into Notes) so you never lose it.'),
       h('div', {style: 'display:grid;grid-template-columns:1fr 1fr;gap:10px'},
@@ -1467,6 +1469,119 @@ function methodNote() {
     h('p', null, h('b', null, 'Chunks in context. '), 'You learn whole phrases you can use, inside example sentences and real dialogues, rather than isolated words.'),
     h('p', null, h('b', null, 'Say it out loud. '), 'Speaking a phrase makes it stick better than reading it silently, so every lesson ends with speaking.'),
     h('p', null, h('b', null, 'Mixed practice. '), 'Reviews shuffle phrases from different lessons, which is harder in the moment and better for long-term recall.'));
+}
+/* ---------------- sync across devices (a private GitHub repo) ----------------
+   One file, progress.json, in a private repo Zack owns, written with a fine-grained token
+   that can only touch that repo. The token lives in its own localStorage key: never in S,
+   never in the backup code, never in the synced file. Merging never loses a review: for each
+   phrase the most recent review wins, finished lessons and favorites are unioned. */
+const SYNC_KEY = 'ff2_sync';
+function syncCfg() { try { const c = JSON.parse(localStorage.getItem(SYNC_KEY)); return c && c.token && c.repo ? c : null; } catch (e) { return null; } }
+let _syncSha = null, _syncT = null, _syncBusy = false, _syncAgain = false, _lastPull = 0;
+const syncState = {at: 0, err: ''};
+const b64enc = str => { const b = new TextEncoder().encode(str); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); };
+const b64dec = b64 => new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\s/g, '')), c => c.charCodeAt(0)));
+function ghReq(cfg, method, url, body) {
+  return fetch('https://api.github.com/repos/' + cfg.repo + url, {method, cache: 'no-store',
+    headers: {Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'},
+    body: body ? JSON.stringify(body) : undefined});
+}
+function syncPayload() { const o = Object.assign({}, S); delete o.resume; delete o.placeResume; o.savedAt = Date.now(); return o; }
+function mergeState(a, b) {
+  const m = JSON.parse(JSON.stringify(a));
+  m.srs = m.srs || {}; m.done = m.done || {}; m.days = m.days || {}; m.roles = m.roles || {}; m.ear = m.ear || {};
+  for (const f in b.srs || {}) { const x = m.srs[f], y = b.srs[f]; if (!x || (y.t || 0) > (x.t || 0)) m.srs[f] = y; }
+  for (const id in b.done || {}) if (!m.done[id]) m.done[id] = b.done[id];
+  for (const d in b.days || {}) { const x = m.days[d], y = b.days[d]; if (!x || (y.a || 0) > (x.a || 0)) m.days[d] = y; }
+  m.stars = [...new Set([...(m.stars || []), ...(b.stars || [])])];
+  const mine = {}; [...(b.mine || []), ...(m.mine || [])].forEach(w => { mine[w.f] = w; }); m.mine = Object.values(mine);
+  for (const k in b.roles || {}) { const x = m.roles[k], y = b.roles[k]; if (!x || (y.best || 0) > (x.best || 0)) m.roles[k] = y; }
+  for (const k in b.ear || {}) if (!m.ear[k] || b.ear[k].length > m.ear[k].length) m.ear[k] = b.ear[k];
+  m.placed = Object.assign({}, b.placed || {}, m.placed || {});
+  m.tests = Object.assign({}, b.tests || {}, m.tests || {});
+  if (!Object.keys(a.srs || {}).length && b.set) m.set = Object.assign({}, b.set, {mic: (a.set || {}).mic});   // a fresh device takes the settings too
+  m.onboard = !!(m.onboard || b.onboard); m.placeHide = !!(m.placeHide || b.placeHide); m.split1 = m.split1 || b.split1; m.migrated = m.migrated || b.migrated;
+  return m;
+}
+async function syncPull(cfg) {
+  const r = await ghReq(cfg, 'GET', '/contents/' + (cfg.path || 'progress.json') + '?t=' + Date.now());
+  if (r.status === 404) { _syncSha = null; return false; }
+  if (!r.ok) throw new Error(r.status === 401 || r.status === 403 ? 'token' : 'http ' + r.status);
+  const j = await r.json(); _syncSha = j.sha; _lastPull = Date.now();
+  const remote = JSON.parse(b64dec(j.content));
+  const before = JSON.stringify(S.srs) + JSON.stringify(S.done) + S.stars.length;
+  const keep = {resume: S.resume, placeResume: S.placeResume};
+  S = Object.assign(mergeState(S, remote), keep);
+  localStorage.setItem(KEY, JSON.stringify(S));
+  return before !== JSON.stringify(S.srs) + JSON.stringify(S.done) + S.stars.length;
+}
+async function syncPush(cfg, retried) {
+  const body = {message: 'Progress ' + new Date().toISOString().slice(0, 16).replace('T', ' '), content: b64enc(JSON.stringify(syncPayload()))};
+  if (_syncSha) body.sha = _syncSha;
+  const r = await ghReq(cfg, 'PUT', '/contents/' + (cfg.path || 'progress.json'), body);
+  if ((r.status === 409 || r.status === 422) && !retried) { await syncPull(cfg); return syncPush(cfg, true); }   // another device saved first: merge, then save
+  if (!r.ok) throw new Error(r.status === 401 || r.status === 403 ? 'token' : r.status === 404 ? 'repo' : 'http ' + r.status);
+  _syncSha = (await r.json()).content.sha;
+}
+async function syncNow(opts = {}) {
+  const cfg = syncCfg(); if (!cfg) return;
+  if (_syncBusy) { _syncAgain = true; return; }
+  _syncBusy = true;
+  try {
+    if (opts.pull || !_lastPull) { const changed = await syncPull(cfg); if (changed && !session) render(); }
+    await syncPush(cfg);
+    syncState.at = Date.now(); syncState.err = '';
+  } catch (e) { syncState.err = navigator.onLine === false ? 'offline' : (e.message || 'error'); }
+  _syncBusy = false;
+  if (_syncAgain) { _syncAgain = false; syncSoon(); }
+}
+function syncSoon() { if (!syncCfg()) return; clearTimeout(_syncT); _syncT = setTimeout(() => syncNow(), 8000); }
+function syncLabel() {
+  if (syncState.err) return {token: 'The token was refused. It may have expired; paste a new one.', repo: 'Can\'t find the repo. Check its name.', offline: 'Offline. It will sync when you\'re back online.'}[syncState.err] || 'Sync failed (' + syncState.err + '). It will try again.';
+  if (!syncState.at) return 'Connected. Syncing…';
+  const m = Math.round((Date.now() - syncState.at) / 60000);
+  return 'Synced ' + (m < 1 ? 'just now' : m === 1 ? 'a minute ago' : m < 60 ? m + ' minutes ago' : 'today');
+}
+function syncBlock(closeSettings) {
+  const cfg = syncCfg();
+  if (!cfg) return h('div', null, h('p', {class: 'muted small', style: 'margin:0 0 10px'}, 'Save your progress to a private GitHub repo so it\'s the same on every device and survives a lost phone.'),
+    h('button', {class: 'btn ghost sm', style: 'width:100%', onclick: () => { closeSettings(); syncSetup(); }}, 'Set up sync'));
+  const lab = h('div', {class: 'd'}, syncLabel());
+  return h('div', null, h('div', {class: 'field'}, h('div', null, h('label', null, cfg.repo), lab)),
+    h('div', {style: 'display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px'},
+      h('button', {class: 'btn ghost sm', style: 'width:100%', onclick: async () => { lab.textContent = 'Syncing…'; await syncNow({pull: true}); lab.textContent = syncLabel(); }}, 'Sync now'),
+      h('button', {class: 'btn ghost sm', style: 'width:100%', onclick: () => confirmSheet('Turn off sync on this device?', 'Your progress stays on this phone and in the repo. You can connect again any time.', 'Turn off', () => { localStorage.removeItem(SYNC_KEY); _syncSha = null; _lastPull = 0; toast('Sync is off on this device'); })}, 'Turn off')));
+}
+function syncSetup() {
+  sheet((el, close) => {
+    const repo = h('input', {class: 'inp', value: 'LeElement/LanguageApp-progress', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false'});
+    const tok = h('input', {class: 'inp', type: 'password', placeholder: 'github_pat_…', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', autocomplete: 'off'});
+    const msg = h('div', {class: 'muted small', style: 'min-height:20px;margin-top:8px'});
+    const step = (n, t, link) => h('div', {class: 'cando', style: 'margin:6px 0'}, h('b', null, n + ' · '), t, link ? h('a', {href: link, target: '_blank', rel: 'noopener', style: 'display:block;margin-top:6px;color:var(--silver2);font-weight:700'}, link.replace('https://', '')) : null);
+    el.append(h('h2', null, 'Sync across devices'),
+      step(1, 'Create a private repo named LanguageApp-progress (tick Private).', 'https://github.com/new'),
+      step(2, 'Create a fine-grained token: Repository access → Only select repositories → LanguageApp-progress. Permissions → Contents → Read and write. Copy the token.', 'https://github.com/settings/personal-access-tokens/new'),
+      step(3, 'Paste it below. Do the same on each device you use.'),
+      h('label', {class: 'small', style: 'display:block;margin:12px 0 4px;font-weight:700'}, 'Repo (owner/name)'), repo,
+      h('label', {class: 'small', style: 'display:block;margin:12px 0 4px;font-weight:700'}, 'Token'), tok, msg,
+      h('button', {class: 'btn primary', style: 'margin-top:8px', onclick: async () => {
+        const cfg = {repo: repo.value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, ''), token: tok.value.trim(), path: 'progress.json'};
+        if (!/^[\w.-]+\/[\w.-]+$/.test(cfg.repo) || !cfg.token) { msg.textContent = 'Fill in both: owner/name and the token.'; return; }
+        msg.textContent = 'Checking…';
+        try {
+          const r = await ghReq(cfg, 'GET', '');
+          if (r.status === 401) { msg.textContent = 'GitHub refused that token. Copy it again?'; return; }
+          if (!r.ok) { msg.textContent = 'Can\'t see that repo. Check the name, and that the token was given access to it.'; return; }
+          if (!(await r.json()).private) { msg.textContent = 'That repo is public. Make it private first, so your progress isn\'t public.'; return; }
+        } catch (e) { msg.textContent = 'Couldn\'t reach GitHub. Are you online?'; return; }
+        localStorage.setItem(SYNC_KEY, JSON.stringify(cfg)); _lastPull = 0; _syncSha = null;
+        msg.textContent = 'Connected. Syncing…';
+        await syncNow({pull: true});
+        if (syncState.err) { msg.textContent = syncLabel(); return; }
+        close(); render(); toast('Sync is on. Progress is saved to ' + cfg.repo, 3500);
+      }}, 'Connect'),
+      h('button', {class: 'btn link', onclick: close}, 'Cancel'));
+  });
 }
 function copyBackup() {
   const code = btoa(unescape(encodeURIComponent(JSON.stringify(S))));
@@ -2515,6 +2630,9 @@ document.addEventListener('keydown', e => {
 });
 render();
 updateBadge();
+if (syncCfg()) syncNow({pull: true});
+document.addEventListener('visibilitychange', () => { if (!document.hidden && syncCfg() && Date.now() - _lastPull > 60000) syncNow({pull: true}); });
+addEventListener('online', () => syncSoon());
 try {   // the speech check never finished last time: the page froze or died, so switch it off
   const t = +localStorage.getItem('ff_sr');
   if (t) { localStorage.removeItem('ff_sr'); if (Date.now() - t > 15000 && S.set.mic !== false) { S.set.mic = false; save(); setTimeout(() => toast('The pronunciation check froze last time, so it\'s off. You can turn it back on in Settings.', 5000), 800); } }
