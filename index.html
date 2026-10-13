@@ -295,6 +295,9 @@ textarea.inp{width:100%;min-height:90px;resize:vertical;font-size:13px;font-fami
 .pst.unchecked{background:transparent;box-shadow:inset 0 0 0 1.5px var(--line2)}
 .pskip{display:flex;flex-direction:column;align-items:center;gap:4px;flex:none}
 .pskip small{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2)}
+.listbtn.quick{margin:12px 0 0;border-color:rgba(94,203,146,.35)}
+.listbtn.quick .ic{background:var(--greenbg);color:var(--green)}
+.listbtn .qgo{flex:none;padding:8px 16px;border-radius:12px;background:var(--green);color:#06140d;font-weight:800;font-size:15px}
 .listbtn.on{border-color:var(--green);box-shadow:inset 0 0 0 1px var(--green)}
 .listbtn.on .ic{background:var(--greenbg);color:var(--green)}
 .bub .cue{font-weight:700;color:var(--ink)}
@@ -816,6 +819,31 @@ function startReview(list, mode, kind) {
   session = {kind: kind || 'review', mode, steps: shuffle(list).map(f => reviewStep(f, mode)), i: 0, ok: 0, bad: 0, missed: [], graded: {}, t0: Date.now()};
   enterSession();
 }
+/* Five minutes: for the days with no time. New phrases from where he is in the main course
+   (meet → check, then used again at the end), his oldest due reviews in between. Only due
+   reviews are graded; the top-up practice is not, because it isn't due yet. */
+function quickPlan() {
+  const rev = dueList().slice(0, 8), want = rev.length >= 4 ? 2 : 3, fresh = [], src = [];
+  for (const u of COURSES.voyage.units) for (const l of u.lessons) {
+    if (fresh.length >= want) break;
+    if (lessonDone(l.id)) continue;
+    const add = l.items.filter(f => !S.srs[f] && !ITEMS[f].pending).slice(0, want - fresh.length);
+    if (add.length) { fresh.push(...add); src.push(l.id); }
+  }
+  const extra = rev.length >= 5 ? [] : Object.keys(S.srs).filter(f => ITEMS[f] && !rev.includes(f)).sort((a, b) => S.srs[a].d - S.srs[b].d).slice(0, 5 - rev.length);
+  return {rev, fresh, extra, src};
+}
+function startQuick() {
+  const q = quickPlan();
+  if (!q.rev.length && !q.fresh.length && !q.extra.length) { toast('Nothing to do right now. Nice!'); return; }
+  const steps = [];
+  q.fresh.forEach(f => steps.push({t: 'intro', f}));
+  shuffle(q.fresh).forEach((f, k) => steps.push(mkStep(k % 2 ? 'fr2en' : 'listen', f)));
+  shuffle([...q.rev, ...q.extra]).forEach(f => steps.push(Object.assign(reviewStep(f, 'mixed'), q.rev.includes(f) ? {rv: 1} : {})));
+  q.fresh.forEach((f, k) => { const ks = practiceKinds(ITEMS[f]); steps.push(stepFromKind(ks[k % ks.length], f)); });   // a mix, not three typing drills in a row
+  session = {kind: 'quick', steps, i: 0, ok: 0, bad: 0, missed: [], graded: {}, fresh: q.fresh, src: q.src, nrev: q.rev.length, t0: Date.now()};
+  enterSession();
+}
 function startTest(uid) {
   const u = UNITS[uid];
   const all = shuffle(u.lessons.flatMap(l => l.items).filter(f => !ITEMS[f].rec));
@@ -1096,6 +1124,13 @@ function homePage(p) {
       h('div', {class: 'row'}, h('span', {class: 'pic', html: I.bolt}), h('div', {class: 'grow'}, h('b', null, 'Already know some French?'), h('div', {class: 'muted small'}, 'A quick check finds what you know, so you start at the right lesson. About ' + placeMinutes(placeBlocks('voyage').length) + ' minutes.'))),
       h('button', {class: 'btn primary', style: 'margin-top:14px', onclick: () => placeSheet('voyage')}, 'Find my level')));
   }
+
+  // five minutes: the easy win on a busy day
+  const qp = quickPlan();
+  if (qp.rev.length || qp.fresh.length || qp.extra.length)
+    p.append(h('button', {class: 'listbtn quick', onclick: startQuick}, h('span', {class: 'ic', html: I.bolt}),
+      h('div', {class: 'grow'}, h('b', null, 'Only have 5 minutes?'), h('span', null, [qp.rev.length ? Math.min(qp.rev.length, 8) + ' review' + (qp.rev.length > 1 ? 's' : '') : '', qp.fresh.length ? qp.fresh.length + ' new phrase' + (qp.fresh.length > 1 ? 's' : '') : ''].filter(Boolean).join(' + ') || 'A quick practice')),
+      h('span', {class: 'qgo'}, 'Go')));
 
   // continue
   const res = S.resume && LESSONS[S.resume.id] ? LESSONS[S.resume.id] : null;
@@ -1668,8 +1703,8 @@ function answer(st, ok, info = {}) {
   if (!st.retry && !st.answered) {
     st.answered = true;
     if (ok) s.ok++; else s.bad++;
-    if (st.f && (s.kind === 'review' || s.kind === 'practice') && !s.graded[st.f]) { s.graded[st.f] = 1; grade(st.f, ok); }
-    if (!ok && st.f && ['lesson', 'review', 'practice'].includes(s.kind) && !s.missed.includes(st.f)) { s.missed.push(st.f); s.steps.push(retryStep(st)); }
+    if (st.f && (s.kind === 'review' || s.kind === 'practice' || st.rv) && !s.graded[st.f]) { s.graded[st.f] = 1; grade(st.f, ok); }
+    if (!ok && st.f && ['lesson', 'review', 'practice', 'quick'].includes(s.kind) && !s.missed.includes(st.f)) { s.missed.push(st.f); s.steps.push(retryStep(st)); }
     if (s.kind === 'place') { placeAfter(s, st, ok); persistResume(); }
   }
   logActivity(s.kind === 'review' || s.kind === 'practice' ? 'review' : 'answer');
@@ -2582,6 +2617,14 @@ function finish() {
     title = 'Nice shadowing!'; sub = LESSONS[s.id].t + '. Do it again tomorrow; repetition is the whole trick.';
     primary = h('button', {class: 'btn primary', onclick: () => startShadow(s.id)}, 'Shadow it again');
     logActivity('review'); save();
+  } else if (s.kind === 'quick') {
+    s.fresh.forEach(f => introduce(f, 1));
+    s.src.forEach(id => { if (!S.done[id] && LESSONS[id].items.every(f => S.srs[f])) S.done[id] = {t: Date.now(), s: acc, quick: 1}; });   // learned bit by bit: the lesson counts
+    save();
+    title = 'Five minutes, done!';
+    sub = [s.nrev ? s.nrev + ' review' + (s.nrev > 1 ? 's' : '') : '', s.fresh.length ? s.fresh.length + ' new phrase' + (s.fresh.length > 1 ? 's' : '') : ''].filter(Boolean).join(' and ') + '. Your streak is safe.';
+    const more = quickPlan();
+    if (more.rev.length || more.fresh.length) primary = h('button', {class: 'btn primary', onclick: () => startQuick()}, 'Another 5 minutes');
   } else if (s.kind === 'role') {
     const sc = roleScene(s.id), n = s.ok + s.bad, prev = S.roles[s.id];
     S.roles[s.id] = {best: Math.max(prev ? prev.best : 0, s.ok), n, t: Date.now()};
