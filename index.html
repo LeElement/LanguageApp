@@ -531,7 +531,37 @@ function toggleStar(f) { const i = S.stars.indexOf(f); if (i >= 0) S.stars.splic
 function logActivity(kind, n = 1) {
   const k = ymd(); const d = S.days[k] || (S.days[k] = {a: 0, l: 0, r: 0});
   d.a += n; if (kind === 'lesson') d.l++; if (kind === 'review') d.r += n; save();
+  reportMC();
 }
+
+/* ---------------- MonCoeur (2026-10-26) ----------------
+   Zack: "is there a way you can auto check to make sure i am doing my french
+   daily". Any lesson or review tells his room's Pi that today counts, over a
+   private ntfy topic, so MonCoeur stops reminding him and can count the days.
+   The topic arrives ONCE in a link MonCoeur texts him (#mc=...) and is kept
+   in this phone only -- it is never in this public source. Offline: the next
+   time the app opens with practice logged today, it says so then. */
+const MC_KEY = 'ff2-mc';
+let _mcAt = 0;
+(function () {
+  const m = location.hash.match(/[#&]mc=([A-Za-z0-9_-]{8,64})/);
+  if (!m) return;
+  try { localStorage.setItem(MC_KEY, m[1]); } catch (e) {}
+  history.replaceState(null, '', location.pathname + location.search);
+  setTimeout(() => toast('Connected to MonCoeur'), 600);
+})();
+function reportMC(force) {
+  let t; try { t = localStorage.getItem(MC_KEY); } catch (e) {}
+  const k = ymd(), d = S.days[k];
+  if (!t || !d || !(d.a > 0) || !navigator.onLine) return;
+  if (!force && Date.now() - _mcAt < 60000) return;
+  _mcAt = Date.now();
+  fetch('https://ntfy.sh/' + t, {method: 'POST', keepalive: true,
+        body: 'french ' + k + ' l=' + (d.l || 0) + ' r=' + (d.r || 0)}).catch(() => { _mcAt = 0; });
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reportMC(); });
+window.addEventListener('online', () => reportMC(true));
+setTimeout(() => reportMC(true), 2500);      // practice done offline earlier today
 function streak() {
   const d = new Date(); let n = 0;
   if (!S.days[ymd(d)]) d.setDate(d.getDate() - 1);
