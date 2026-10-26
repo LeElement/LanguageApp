@@ -157,7 +157,8 @@ svg{display:block}
 .switch::after{content:'';position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:var(--ink2);transition:transform .2s,background .2s}
 .switch.on{background:var(--green)}
 .switch.on::after{transform:translateX(20px);background:#fff}
-input[type=date],select.inp,textarea.inp{background:var(--card);border:1px solid var(--line2);border-radius:12px;padding:10px 12px;font-size:16px;color:var(--ink)}
+input[type=date],select.inp,textarea.inp,input.inp{background:var(--card);border:1px solid var(--line2);border-radius:12px;padding:10px 12px;font-size:16px;color:var(--ink)}
+input.inp{width:100%;outline:none}input.inp:focus{border-color:var(--silver2)}
 textarea.inp{width:100%;min-height:90px;resize:vertical;font-size:13px;font-family:ui-monospace,Menlo,monospace}
 
 /* ---------- session (lesson / review) ---------- */
@@ -543,21 +544,42 @@ function logActivity(kind, n = 1) {
    time the app opens with practice logged today, it says so then. */
 const MC_KEY = 'ff2-mc';
 let _mcAt = 0;
+const mcTopic = s => { s = String(s || '').trim(); const m = s.match(/(?:^|[#&?])mc=([A-Za-z0-9_-]{8,64})$/) || s.match(/^([A-Za-z0-9_-]{8,64})$/); return m ? m[1] : ''; };
+function mcConnected() { try { return !!localStorage.getItem(MC_KEY); } catch (e) { return false; } }
+/* A link tapped in Messages opens in his browser (Chrome), and on iOS the home-screen app keeps
+   storage of its own: pairing the browser alone would never report from the app he uses.
+   So outside the installed app, the link also offers the code to paste in there. */
+const isStandalone = () => navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
 (function () {
-  const m = location.hash.match(/[#&]mc=([A-Za-z0-9_-]{8,64})/);
-  if (!m) return;
-  try { localStorage.setItem(MC_KEY, m[1]); } catch (e) {}
+  const t = mcTopic(location.hash);
+  if (!t) return;
+  try { localStorage.setItem(MC_KEY, t); } catch (e) {}
   history.replaceState(null, '', location.pathname + location.search);
-  setTimeout(() => toast('Connected to MonCoeur'), 600);
+  if (isStandalone()) { setTimeout(() => toast('Connected to MonCoeur'), 600); return; }
+  setTimeout(() => sheet((el, close) => {
+    const code = 'mc=' + t, box = h('input', {class: 'inp', value: code, readonly: true, onfocus: e => e.target.select()});
+    el.append(h('h2', null, 'One more step'),
+      h('p', {class: 'muted'}, 'This opened in your browser. Your Français app on the home screen keeps its own storage, so connect it there:'),
+      h('div', {class: 'cando', style: 'margin:6px 0'}, h('b', null, '1 · '), 'Tap Copy.'),
+      h('div', {class: 'cando', style: 'margin:6px 0'}, h('b', null, '2 · '), 'Open Français from your home screen.'),
+      h('div', {class: 'cando', style: 'margin:6px 0 14px'}, h('b', null, '3 · '), 'Settings (the gear) → MonCoeur → Paste → Connect.'),
+      box,
+      h('button', {class: 'btn primary', style: 'margin-top:10px', onclick: () => { const ok = () => toast('Copied. Now open the app from your home screen', 3000), sel = () => { box.focus(); box.select(); toast('Select it and copy'); }; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code).then(ok, sel); else sel(); }}, 'Copy'),
+      h('button', {class: 'btn link', onclick: close}, 'Close'));
+  }), 600);
 })();
 function reportMC(force) {
   let t; try { t = localStorage.getItem(MC_KEY); } catch (e) {}
   const k = ymd(), d = S.days[k];
-  if (!t || !d || !(d.a > 0) || !navigator.onLine) return;
+  // Real practice only: a finished lesson, or five answers anywhere (the 5-minute
+  // session, ear training and role-play log answers, not "reviews"). MonCoeur
+  // ignores l=0 r=0, so r carries every answer that wasn't a lesson finishing.
+  const work = d ? Math.max(d.r || 0, (d.a || 0) - (d.l || 0)) : 0;
+  if (!t || !d || !(d.l > 0 || work >= 5) || !navigator.onLine) return;
   if (!force && Date.now() - _mcAt < 60000) return;
   _mcAt = Date.now();
   fetch('https://ntfy.sh/' + t, {method: 'POST', keepalive: true,
-        body: 'french ' + k + ' l=' + (d.l || 0) + ' r=' + (d.r || 0)}).catch(() => { _mcAt = 0; });
+        body: 'french ' + k + ' l=' + (d.l || 0) + ' r=' + work}).catch(() => { _mcAt = 0; });
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reportMC(); });
 window.addEventListener('online', () => reportMC(true));
@@ -1492,6 +1514,8 @@ function settingsSheet() {
       reminderBlock(),
       h('div', {class: 'sect'}, 'Sync across devices'),
       syncBlock(close),
+      h('div', {class: 'sect'}, 'MonCoeur'),
+      mcBlock(),
       h('div', {class: 'sect'}, 'Backup'),
       h('p', {class: 'muted small', style: 'margin:0 0 10px'}, 'Progress lives on this phone only. Copy a backup code now and then (e.g. into Notes) so you never lose it.'),
       h('div', {style: 'display:grid;grid-template-columns:1fr 1fr;gap:10px'},
@@ -1611,6 +1635,32 @@ function syncLabel() {
   if (!syncState.at) return 'Connected. Syncing…';
   const m = Math.round((Date.now() - syncState.at) / 60000);
   return 'Synced ' + (m < 1 ? 'just now' : m === 1 ? 'a minute ago' : m < 60 ? m + ' minutes ago' : 'today');
+}
+/* Pairing from inside the installed app: paste the link MonCoeur sent, or the code. */
+function mcBlock() {
+  const box = h('div');
+  const paint = () => {
+    box.innerHTML = '';
+    if (mcConnected()) {
+      box.append(h('div', {class: 'field'}, h('div', null, h('label', null, 'Connected'), h('div', {class: 'd'}, 'Any lesson or review tells MonCoeur you practised today, so it skips that night\'s reminder.'))),
+        h('button', {class: 'btn ghost sm', style: 'width:100%;margin-top:10px', onclick: () => confirmSheet('Disconnect MonCoeur?', 'It will stop seeing your practice and remind you every night.', 'Disconnect', () => { try { localStorage.removeItem(MC_KEY); } catch (e) {} toast('Disconnected'); paint(); })}, 'Disconnect'));
+      return;
+    }
+    const inp = h('input', {class: 'inp', placeholder: 'Paste the link or code from MonCoeur', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', autocomplete: 'off'});
+    const msg = h('div', {class: 'muted small', style: 'min-height:18px;margin-top:6px'});
+    const connect = () => {
+      const t = mcTopic(inp.value);
+      if (!t) { msg.textContent = 'That doesn\'t look like the MonCoeur link. Copy it again?'; return; }
+      try { localStorage.setItem(MC_KEY, t); } catch (e) { msg.textContent = 'Couldn\'t save it on this phone.'; return; }
+      reportMC(true); toast('Connected to MonCoeur'); paint();
+    };
+    box.append(h('p', {class: 'muted small', style: 'margin:0 0 10px'}, 'Lets MonCoeur see the days you practise, so it only reminds you when you haven\'t.'), inp, msg,
+      h('div', {style: 'display:grid;grid-template-columns:1fr 1fr;gap:10px'},
+        navigator.clipboard && navigator.clipboard.readText ? h('button', {class: 'btn ghost sm', style: 'width:100%', onclick: async () => { try { inp.value = await navigator.clipboard.readText(); connect(); } catch (e) { msg.textContent = 'Long-press the box and choose Paste.'; inp.focus(); } }}, 'Paste') : null,
+        h('button', {class: 'btn primary sm', style: 'width:100%', onclick: connect}, 'Connect')));
+  };
+  paint();
+  return box;
 }
 function syncBlock(closeSettings) {
   const cfg = syncCfg();
