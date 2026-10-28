@@ -456,7 +456,11 @@ function lev(a, b) {   // optimal string alignment: a swap of two letters counts
 }
 const DAY = 864e5;
 const ymd = (d = new Date()) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-function dayAt(offset) { const d = new Date(); d.setHours(4, 0, 0, 0); d.setDate(d.getDate() + offset); return d.getTime(); }
+// A study day runs 4am to 4am. Zack's evenings go past midnight (French from 10pm, bed ~1:30),
+// so a session at 12:30 is still that night: it keeps the streak, MonCoeur's date and the
+// next review all on the right day.
+function studyDate(offset = 0) { const d = new Date(); if (d.getHours() < 4) d.setDate(d.getDate() - 1); d.setDate(d.getDate() + offset); return d; }
+function dayAt(offset) { const d = studyDate(offset); d.setHours(4, 0, 0, 0); return d.getTime(); }
 function core(f) { return f.replace(/\s*[…]+\s*\??$/, '').replace(/[?!.]+$/, '').trim(); }
 function toast(msg, ms = 1800) { const t = h('div', {class: 'toast'}, msg); document.body.append(t); setTimeout(() => t.remove(), ms); }
 function vib(ms) { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} }
@@ -530,7 +534,7 @@ function toggleStar(f) { const i = S.stars.indexOf(f); if (i >= 0) S.stars.splic
 
 /* ---------------- activity & streak ---------------- */
 function logActivity(kind, n = 1) {
-  const k = ymd(); const d = S.days[k] || (S.days[k] = {a: 0, l: 0, r: 0});
+  const k = ymd(studyDate()); const d = S.days[k] || (S.days[k] = {a: 0, l: 0, r: 0});
   d.a += n; if (kind === 'lesson') d.l++; if (kind === 'review') d.r += n; save();
   reportMC();
 }
@@ -570,7 +574,7 @@ const isStandalone = () => navigator.standalone === true || (window.matchMedia &
 })();
 function reportMC(force) {
   let t; try { t = localStorage.getItem(MC_KEY); } catch (e) {}
-  const k = ymd(), d = S.days[k];
+  const k = ymd(studyDate()), d = S.days[k];
   // Real practice only: a finished lesson, or five answers anywhere (the 5-minute
   // session, ear training and role-play log answers, not "reviews"). MonCoeur
   // ignores l=0 r=0, so r carries every answer that wasn't a lesson finishing.
@@ -585,7 +589,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 window.addEventListener('online', () => reportMC(true));
 setTimeout(() => reportMC(true), 2500);      // practice done offline earlier today
 function streak() {
-  const d = new Date(); let n = 0;
+  const d = studyDate(); let n = 0;
   if (!S.days[ymd(d)]) d.setDate(d.getDate() - 1);
   while (S.days[ymd(d)] && S.days[ymd(d)].a > 0) { n++; d.setDate(d.getDate() - 1); }
   return n;
@@ -617,6 +621,22 @@ function srsStats() {
   return c;
 }
 function upcoming(days) { const lim = dayAt(days); return Object.keys(S.srs).filter(f => ITEMS[f] && S.srs[f].d > Date.now() && S.srs[f].d <= lim).length; }
+/* Back after a break (2026-10-28): everything that came due while he was away would greet him
+   at once ("180 phrases to review"), and that wall is how people quit. After 4+ days with
+   nothing reviewed and more than two sessions due, the overdue phrases are dealt over the next
+   days, a session's worth each, so every day mixes strong and shaky ones. */
+function spreadBacklog() {
+  const due = dueList(), per = Math.max(10, S.set.size || 15);
+  if (due.length <= per * 2) return 0;
+  let last = 0; for (const f in S.srs) last = Math.max(last, S.srs[f].t || 0);
+  if (Date.now() - last < 4 * DAY) return 0;
+  const days = Math.ceil(due.length / per);
+  due.sort((a, b) => S.srs[a].b - S.srs[b].b || S.srs[a].d - S.srs[b].d)
+    .forEach((f, i) => { if (i % days) S.srs[f].d = dayAt(i % days); });
+  saveNow();
+  setTimeout(() => toast('Welcome back. ' + due.length + ' reviews piled up while you were away, so they\'re spread over ' + days + ' days: one session a day.', 5500), 900);
+  return days;
+}
 
 /* ---------------- audio: one recorded voice, nothing else ---------------- */
 const player = new Audio();
@@ -1208,7 +1228,7 @@ function homePage(p) {
   p.append(h('div', {class: 'sect'}, 'This week'));
   const st = streak();
   const wk = h('div', {class: 'week'});
-  const d0 = new Date(); const dow = (d0.getDay() + 6) % 7; d0.setDate(d0.getDate() - dow);
+  const d0 = studyDate(); const dow = (d0.getDay() + 6) % 7; d0.setDate(d0.getDate() - dow);
   ['M', 'T', 'W', 'T', 'F', 'S', 'S'].forEach((L, i) => {
     const d = new Date(d0); d.setDate(d0.getDate() + i);
     const on = S.days[ymd(d)] && S.days[ymd(d)].a > 0;
@@ -1529,6 +1549,7 @@ function settingsSheet() {
 }
 function reminderBlock() {
   const box = h('div');
+  if (mcConnected()) box.append(h('p', {class: 'muted small', style: 'margin:0 2px 12px'}, 'MonCoeur already texts you on nights you haven\'t practised, so you don\'t need this as well. If you added it before, delete the Français event in Calendar.'));
   const hourSel = h('select', {class: 'inp', onchange: e => { S.set.remind = +e.target.value; save(); }});
   for (let hr = 7; hr <= 22; hr++) hourSel.append(h('option', {value: hr, selected: S.set.remind === hr}, (hr % 12 || 12) + (hr < 12 ? ' am' : ' pm')));
   box.append(h('div', {class: 'field'}, h('div', null, h('label', null, 'Remind me at'), h('div', {class: 'd'}, 'A daily Calendar alert, no account needed')), hourSel),
@@ -2757,8 +2778,10 @@ document.addEventListener('keydown', e => {
   if (n >= 1 && n <= 4) { const o = SV.body.querySelectorAll('.opt')[n - 1]; if (o) o.click(); }
   if (e.key === 'Enter') { const b = SV.foot.querySelector('.btn:not([disabled])'); if (b) b.click(); }
 });
+spreadBacklog();
 render();
 updateBadge();
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !session && spreadBacklog()) { render(); updateBadge(); } });   // an app left open for days
 if (syncCfg()) syncNow({pull: true});
 document.addEventListener('visibilitychange', () => { if (!document.hidden && syncCfg() && Date.now() - _lastPull > 60000) syncNow({pull: true}); });
 addEventListener('online', () => syncSoon());
